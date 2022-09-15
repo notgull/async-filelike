@@ -1,0 +1,75 @@
+//! Run file I/O on multiple tasks.
+//!
+//! To demonstrate, this opens every file in the directory, reads the contents,
+//! and then determines how many characters there are in every file combined.
+
+use async_channel::bounded;
+use async_executor::Executor;
+use async_filelike::{Adaptor, WontSeek};
+use async_io::block_on;
+use easy_parallel::Parallel;
+use futures_lite::{prelude::*, stream};
+use std::{fs, io};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
+    // Set up a multithreaded executor.
+    let (shutdown, signal) = bounded::<()>(1);
+    let executor = Executor::new();
+    Parallel::new()
+        .each(0..4, |_| {
+            // Run tasks from the global queue on this thread.
+            block_on(executor.run(signal.recv())).ok();
+        })
+        .finish(|| {
+            block_on(async {
+                // Get a list of every file in the current directory.
+                let read_dir = blocking::unblock(|| fs::read_dir(".")).await?;
+                let mut read_dir = blocking::Unblock::new(read_dir);
+
+                // Open a new task for every file.
+                let mut tasks = vec![];
+                while let Some(entry) = read_dir.next().await {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_file() {
+                        // Spawn a task that reads from the file.
+                        let task = executor.spawn(async move {
+                            // Open the file.
+                            let file = blocking::unblock(move || fs::File::open(&path)).await?;
+                            let mut file = Adaptor::new(file);
+
+                            // Read the contents.
+                            let mut contents = vec![];
+                            file.read_to_end(&mut contents).await?;
+
+                            // Return the number of characters.
+                            Ok::<_, io::Error>(contents.len())
+                        });
+
+                        // Push the task into our handle list.
+                        tasks.push(task);
+                    }
+                }
+
+                // Get the sum of characters.
+                let total_len = stream::iter(tasks)
+                    .then(std::convert::identity)
+                    .try_fold(0, |sum, result| Ok(sum + result))
+                    .await?;
+
+                // Write the number to stdout.
+                let stdout_handle = io::stdout();
+                let mut stdout = Adaptor::new(WontSeek::from(stdout_handle));
+                let data_to_write = format!("Total length: {}\n", total_len);
+
+                stdout.write_all(data_to_write.as_bytes()).await?;
+
+                // Shutdown the executor and return.
+                drop(shutdown);
+                Ok(())
+            })
+        })
+        .1
+}
