@@ -30,7 +30,7 @@ struct Runtime {
 
     /// Mutex holding the buffer for events.
     ///
-    /// Holding this lock implies the exclusive right to poll it.
+    /// Holding this lock implies the exclusive right to poll the ring.
     events: Mutex<Events>,
 
     /// The next operation ID to use.
@@ -103,8 +103,8 @@ impl Runtime {
 
     /// Wait for an operation to occur.
     async fn pump_events(&self, key: u64) -> io::Result<Completion> {
-        // Exponential backoff for timeouts.
-        const BACKOFF: &[u64] = &[50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 10_000];
+        // Backoff for timeouts.
+        const BACKOFF: &[u64] = &[2, 3, 10, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 10_000];
 
         let mut backoff_index = 0;
 
@@ -124,13 +124,14 @@ impl Runtime {
                 .map_or_else(Timer::never, |t| Timer::after(Duration::from_micros(*t)));
             let timeout = async {
                 timer.await;
-                Ok(true)
+                log::trace!("pump_events: Timeout while polling for events");
+                io::Result::Ok(true)
             };
 
             // Poll the ring for events.
-            let poller = async { self.ring.wait(&mut events.buffer).await.map(|len| len == 0) };
+            let poller = async { self.ring.wait(&mut events.buffer).await.map(|_| false) };
 
-            log::trace!("Waiting for events");
+            log::trace!("pump_events: waiting for events");
             let snoozed = poller.or(timeout).await?;
 
             if snoozed {
@@ -139,6 +140,8 @@ impl Runtime {
                 // Drain the buffer into the map. If we see our event, return it.
                 let mut our_completion = None;
                 let Events { buffer, events } = &mut *events;
+
+                log::trace!("pump_events: found {} events", buffer.len());
 
                 for completion in buffer.drain(..) {
                     if completion.key() == key {
