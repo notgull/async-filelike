@@ -118,8 +118,9 @@ impl Runtime {
             };
 
             // Poll the ring for events.
-            let poller = async { self.ring.wait(&mut events.buffer).await.map(|len| len > 0) };
+            let poller = async { self.ring.wait(&mut events.buffer).await.map(|len| len == 0) };
 
+            log::trace!("Waiting for events");
             let snoozed = poller.or(timeout).await?;
 
             if snoozed {
@@ -435,7 +436,7 @@ impl<T: Send + Read + Seek + Unpin + 'static> AsyncRead for Adaptor<T> {
                             };
                             buf_slice.copy_from_slice(&buffer[..increase]);
                             increase
-                        },
+                        }
                         Err(_) => 0,
                     };
 
@@ -486,7 +487,7 @@ impl<T: Send + Write + Seek + Unpin + 'static> AsyncWrite for Adaptor<T> {
 
                         // Copy `buf` into our own buffer.
                         buffer.clear();
-                        buffer.extend_from_slice(buf); 
+                        buffer.extend_from_slice(buf);
                         let len = buf.len();
 
                         let task = async move {
