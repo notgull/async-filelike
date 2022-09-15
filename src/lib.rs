@@ -18,7 +18,10 @@ use async_lock::Mutex;
 use blocking::Unblock;
 use futures_lite::{prelude::*, ready};
 use once_cell::sync::Lazy;
-use submission::{AsRaw, Buf, Completion, Operation, OperationBuilder, Raw, Ring};
+use submission::{AsRaw, AsyncParameter, Completion, Operation, OperationBuilder, Raw, Ring};
+
+#[doc(inline)]
+pub use submission::{Buf, BufMut};
 
 /// The runtime dictating how to handle the submission queue.
 struct Runtime {
@@ -91,7 +94,7 @@ impl Runtime {
     /// # Safety
     ///
     /// The operation must not be moved or forgotten.
-    unsafe fn submit<T: Buf>(
+    unsafe fn submit<T: AsyncParameter>(
         &'static self,
         operation: Pin<&mut Operation<'static, T>>,
     ) -> io::Result<()> {
@@ -205,7 +208,7 @@ impl<T: AsRawHandle> Handle<T> {
 
 impl<T: Send + 'static> Handle<T> {
     /// Run the operation on either the thread pool or the submission queue.
-    async fn run_operation<R: Send + 'static, B: AsRef<[u8]> + Send + 'static>(
+    async fn run_operation<R: Send + 'static, B: AsyncParameter + Send + 'static>(
         &mut self,
         buffer: B,
         threadpool_op: impl FnOnce(&mut T, B) -> (B, io::Result<R>) + Send + 'static,
@@ -266,7 +269,7 @@ impl<T: Send + 'static> Handle<T> {
 
 impl<T: Read + Seek + Send + 'static> Handle<T> {
     /// Read into the given buffer at the given offset.
-    pub async fn read_into<B: AsRef<[u8]> + AsMut<[u8]> + Send + 'static>(
+    pub async fn read_into<B: AsMut<[u8]> + BufMut + Send + 'static>(
         &mut self,
         buf: B,
         len: usize,
@@ -298,7 +301,7 @@ impl<T: Read + Seek + Send + 'static> Handle<T> {
 
 impl<T: Write + Seek + Send + 'static> Handle<T> {
     /// Write from the buffer at the given offset.
-    pub async fn write_from<B: AsRef<[u8]> + Send + 'static>(
+    pub async fn write_from<B: AsRef<[u8]> + Buf + Send + 'static>(
         &mut self,
         buf: B,
         len: usize,
@@ -398,6 +401,8 @@ impl<T: Send + Read + Seek + Unpin + 'static> AsyncRead for Adaptor<T> {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
+        let len = <[u8]>::len(buf);
+
         loop {
             match &mut self.state {
                 State::Hole => unreachable!("Cannot poll an empty hole"),
@@ -421,10 +426,9 @@ impl<T: Send + Read + Seek + Unpin + 'static> AsyncRead for Adaptor<T> {
                         } = idle;
 
                         // Resize the buffer if needed.
-                        if buffer.len() < buf.len() {
-                            buffer.resize(buf.len(), 0);
+                        if buffer.len() < len {
+                            buffer.resize(len, 0);
                         }
-                        let len = buf.len();
 
                         let task = async move {
                             let (buffer, res) = io.read_into(buffer, len, offset).await;
@@ -572,17 +576,25 @@ impl<T: Send + Write + Seek + Unpin + 'static> AsyncWrite for Adaptor<T> {
 
 struct MovableBuf<B>(Option<B>);
 
-impl<B: AsRef<[u8]>> AsRef<[u8]> for MovableBuf<B> {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_ref().unwrap().as_ref()
+unsafe impl<B: AsyncParameter> AsyncParameter for MovableBuf<B> {
+    fn ptr(&self) -> Option<std::ptr::NonNull<u8>> {
+        self.0.as_ref().and_then(|b| b.ptr())
     }
-}
 
-impl<B: AsMut<[u8]>> AsMut<[u8]> for MovableBuf<B> {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.0.as_mut().unwrap().as_mut()
+    fn ptr2(&self) -> Option<std::ptr::NonNull<u8>> {
+        self.0.as_ref().and_then(|b| b.ptr2())
+    }
+
+    fn len(&self) -> usize {
+        self.0.as_ref().map(|b| b.len()).unwrap_or(0)
+    }
+
+    fn len2(&self) -> usize {
+        self.0.as_ref().map(|b| b.len2()).unwrap_or(0)
     }
 }
+unsafe impl<B: Buf> Buf for MovableBuf<B> {}
+unsafe impl<B: BufMut> BufMut for MovableBuf<B> {}
 
 impl<B> From<B> for MovableBuf<B> {
     fn from(buf: B) -> Self {
