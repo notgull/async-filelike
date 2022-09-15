@@ -121,7 +121,7 @@ impl Runtime {
                 .map_or_else(Timer::never, |t| Timer::after(Duration::from_micros(*t)));
             let timeout = async {
                 timer.await;
-                Ok(false)
+                Ok(true)
             };
 
             // Poll the ring for events.
@@ -223,13 +223,14 @@ impl<T: Send + 'static> Handle<T> {
                 io.with_mut(move |io| threadpool_op(io, buffer)).await
             }
             Repr::Submission { io, raw } => {
-                // Create an operation and pin it to the stack.
+                // Create an operation.
                 let io = io.as_mut().unwrap();
                 let operation =
                     get_operation(Runtime::get_unchecked().operation(), io, raw, buffer);
                 let key = operation.key();
 
-                // Pin the allocation to the heap. Even if this is forgotten, it doesn't matter.
+                // Pin the operation to the heap. Even if this is forgotten, it doesn't matter, since the user
+                // loses access.
                 let mut operation = Box::pin(operation);
 
                 // Submit the operation.
