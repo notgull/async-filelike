@@ -16,7 +16,7 @@ use std::time::Duration;
 use async_io::Timer;
 use async_lock::Mutex;
 use blocking::Unblock;
-use futures_lite::{pin, prelude::*, ready};
+use futures_lite::{prelude::*, ready};
 use once_cell::sync::Lazy;
 use submission::{AsRaw, Buf, Completion, Operation, OperationBuilder, Raw, Ring};
 
@@ -87,7 +87,14 @@ impl Runtime {
     }
 
     /// Submit an `Operation` to the runtime.
-    fn submit<T: Buf>(&'static self, operation: Pin<&mut Operation<'static, T>>) -> io::Result<()> {
+    ///
+    /// # Safety
+    ///
+    /// The operation must not be moved or forgotten.
+    unsafe fn submit<T: Buf>(
+        &'static self,
+        operation: Pin<&mut Operation<'static, T>>,
+    ) -> io::Result<()> {
         self.ring.submit(operation)
     }
 
@@ -221,10 +228,14 @@ impl<T: Send + 'static> Handle<T> {
                 let operation =
                     get_operation(Runtime::get_unchecked().operation(), io, raw, buffer);
                 let key = operation.key();
-                pin!(operation);
+
+                // Pin the allocation to the heap. Even if this is forgotten, it doesn't matter.
+                let mut operation = Box::pin(operation);
 
                 // Submit the operation.
-                Runtime::get_unchecked().submit(operation.as_mut()).ok();
+                unsafe {
+                    Runtime::get_unchecked().submit(operation.as_mut()).ok();
+                }
 
                 // Wait for the operation to complete.
                 let completion = Runtime::get_unchecked().pump_events(key).await;
@@ -233,13 +244,16 @@ impl<T: Send + 'static> Handle<T> {
                     Ok(completion) => completion,
                     Err(err) => {
                         // Cancel the operation and return.
-                        let op_unlocked = operation.cancel().expect("Failed to cancel operation");
+                        let op_unlocked = operation
+                            .as_mut()
+                            .cancel()
+                            .expect("Failed to cancel operation");
                         return (op_unlocked.buffer_mut().0.take().unwrap(), Err(err));
                     }
                 };
 
                 // Unlock the operation and move out the buffer.
-                let op_unlocked = operation.unlock(&completion).unwrap();
+                let op_unlocked = operation.as_mut().unlock(&completion).unwrap();
                 let buffer = op_unlocked.buffer_mut().0.take().unwrap();
                 let result = completion.result();
 
