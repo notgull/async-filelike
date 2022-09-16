@@ -190,7 +190,7 @@ impl Runtime {
             };
 
             // Poll the ring for events.
-            let poller = async { self.ring.wait(&mut events.buffer).await.map(|_| false) };
+            let poller = async { self.ring.wait(&mut events.buffer).await.map(|len| len == 0) };
 
             log::trace!("pump_events: waiting for events");
             let snoozed = poller.or(timeout).await?;
@@ -216,6 +216,9 @@ impl Runtime {
                 if let Some(completion) = our_completion {
                     return Ok(completion);
                 }
+
+                // Reset the backoff.
+                backoff_index = 0;
             }
 
             // Try again. Drop the lock as well so other tasks can look for their events.
