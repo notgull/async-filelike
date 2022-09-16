@@ -795,6 +795,9 @@ impl<B> From<B> for MovableBuf<B> {
 
 struct RawContainer(Raw);
 
+unsafe impl Send for RawContainer {}
+unsafe impl Sync for RawContainer {}
+
 #[cfg(unix)]
 impl AsRawFd for RawContainer {
     fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
@@ -805,7 +808,7 @@ impl AsRawFd for RawContainer {
 #[cfg(windows)]
 impl AsRawHandle for RawContainer {
     fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
-        self.0.as_raw_handle()
+        self.0
     }
 }
 
