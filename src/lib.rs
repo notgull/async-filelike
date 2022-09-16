@@ -142,9 +142,8 @@ impl Runtime {
     /// Register a new source.
     fn register(
         &self,
-        #[cfg(unix)] source: &impl AsRawFd,
-        #[cfg(windows)] source: &impl AsRawHandle,
-    ) -> io::Result<()> {
+        source: &impl AsRaw,
+    ) -> io::Result<Raw> {
         log::trace!("Runtime: registering new source");
         self.ring.register(source)
     }
@@ -273,10 +272,10 @@ impl<T: AsRawFd> Handle<T> {
     /// Create a new `Handle`.
     pub fn new(io: T) -> io::Result<Self> {
         if let Some(rt) = Runtime::get() {
-            rt.register(&io)?;
+            let handle = rt.register(&io)?;
 
             Ok(Self(Repr::Submission {
-                raw: RawContainer(io.as_raw()),
+                raw: RawContainer(handle),
                 io: Some(io),
             }))
         } else {
@@ -290,10 +289,10 @@ impl<T: AsRawHandle> Handle<T> {
     /// Create a new `Handle`.
     pub fn new(io: T) -> io::Result<Self> {
         if let Some(rt) = Runtime::get() {
-            rt.register(&io)?;
+            let handle = rt.register(&io)?;
 
             Ok(Self(Repr::Submission {
-                raw: RawContainer(io.as_raw()),
+                raw: RawContainer(handle),
                 io: Some(io),
             }))
         } else {
