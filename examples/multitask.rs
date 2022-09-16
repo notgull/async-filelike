@@ -29,43 +29,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let read_dir = blocking::Unblock::new(read_dir);
 
                 // Open a new task for every file.
-                let tasks = read_dir.filter_map(|entry| {
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(err) => return Some(Err(err)),
-                    };
+                let tasks = read_dir
+                    .filter_map(|entry| {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(err) => return Some(Err(err)),
+                        };
 
-                    let path = entry.path();
-                    if path.is_file() {
-                        // Spawn a task that reads from the file.
-                        let task = executor.spawn(async move {
-                            // Open the file.
-                            let file = blocking::unblock(move || fs::File::open(&path)).await?;
-                            let mut file = Adaptor::new(file);
+                        let path = entry.path();
+                        if path.is_file() {
+                            // Spawn a task that reads from the file.
+                            let task = executor.spawn(async move {
+                                // Open the file.
+                                let file = blocking::unblock(move || fs::File::open(&path)).await?;
+                                let mut file = Adaptor::new(file);
 
-                            // Read the contents.
-                            let mut contents = vec![];
-                            file.read_to_end(&mut contents).await?;
+                                // Read the contents.
+                                let mut contents = vec![];
+                                file.read_to_end(&mut contents).await?;
 
-                            // Return the number of characters.
-                            Ok::<_, io::Error>(contents.len())
-                        });
+                                // Return the number of characters.
+                                Ok::<_, io::Error>(contents.len())
+                            });
 
-                        Some(io::Result::Ok(task))
-                    } else {
-                        None
-                    }
-                }).collect::<Vec<_>>().await;
+                            Some(io::Result::Ok(task))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .await;
 
                 // Get the sum of characters.
                 let total_len = stream::iter(tasks)
-                    .then(|task| Box::pin(async move {
+                    .then(|task| async move {
                         match task {
                             Ok(task) => task.await,
                             Err(err) => Err(err),
                         }
-                    }))
-                    .try_fold(0, |sum, result| Ok(sum + result))
+                    })
+                    .fold(io::Result::Ok(0), |sum, result| Ok(sum? + result?))
                     .await?;
 
                 // Write the number to stdout.
