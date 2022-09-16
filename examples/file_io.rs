@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     async_io::block_on(async {
         // TODO: handle file opening in-crate
         let file = blocking::unblock(|| std::fs::File::create("foo.txt")).await?;
-        let mut file = Handle::new(file);
+        let mut file = Handle::new(file)?;
 
         // Write some data to the file
         println!("Writing data...");
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Close and reopen the file.
         drop(file);
         let file = blocking::unblock(|| std::fs::File::open("foo.txt")).await?;
-        let mut file = Handle::new(file);
+        let mut file = Handle::new(file)?;
 
         // Read the data back.
         println!("Reading data...");
@@ -30,7 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Close the file and delete it.
         drop(file);
-        blocking::unblock(|| std::fs::remove_file("foo.txt")).await?;
+        blocking::unblock(|| std::fs::remove_file("foo.txt"))
+            .await
+            .unwrap();
 
         Ok(())
     })

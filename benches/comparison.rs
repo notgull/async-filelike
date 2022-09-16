@@ -40,7 +40,7 @@ fn filelike_io(c: &mut Criterion) {
     let mut group = c.benchmark_group("filelike_io");
 
     group.bench_function("Read", |b| {
-        let mut file = Adaptor::new(fs::File::create("foo.txt").unwrap());
+        let mut file = Adaptor::new(fs::File::create("foo.txt").unwrap()).unwrap();
         let buf = vec![0u8; 10_000];
         block_on(file.write_all(&buf)).unwrap();
         let mut buf = Some(buf);
@@ -57,7 +57,7 @@ fn filelike_io(c: &mut Criterion) {
     });
 
     group.bench_function("Write", |b| {
-        let mut file = Adaptor::new(fs::File::create("foo.txt").unwrap());
+        let mut file = Adaptor::new(fs::File::create("foo.txt").unwrap()).unwrap();
         let mut buf = Some(vec![0u8; 10_000]);
 
         b.iter(|| {

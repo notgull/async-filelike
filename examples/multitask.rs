@@ -5,7 +5,7 @@
 
 use async_channel::bounded;
 use async_executor::Executor;
-use async_filelike::{Adaptor, WontSeek};
+use async_filelike::Adaptor;
 use async_io::block_on;
 use easy_parallel::Parallel;
 use futures_lite::{prelude::*, stream};
@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let task = executor.spawn(async move {
                                 // Open the file.
                                 let file = blocking::unblock(move || fs::File::open(&path)).await?;
-                                let mut file = Adaptor::new(file);
+                                let mut file = Adaptor::new(file)?;
 
                                 // Read the contents.
                                 let mut contents = vec![];
@@ -65,18 +65,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .then(|task| async move {
                         match task {
                             Ok(task) => task.await,
-                            Err(err) => Err(err),
+                            Err(err) =>  {
+                                Err(err)
+                            },
                         }
                     })
                     .fold(io::Result::Ok(0), |sum, result| Ok(sum? + result?))
                     .await?;
 
-                // Write the number to stdout.
-                let stdout_handle = io::stdout();
-                let mut stdout = Adaptor::new(WontSeek::from(stdout_handle));
-                let data_to_write = format!("Total length: {}\n", total_len);
-
-                stdout.write_all(data_to_write.as_bytes()).await?;
+                println!("Total length: {}", total_len);
 
                 // Shutdown the executor and return.
                 drop(shutdown);

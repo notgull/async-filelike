@@ -129,11 +129,6 @@ impl Runtime {
         GLOBAL_RUNTIME.as_ref()
     }
 
-    /// Is the runtime available?
-    fn available() -> bool {
-        Self::get().is_some()
-    }
-
     /// Shorthand for get().unwrap().
     fn get_unchecked() -> &'static Self {
         Self::get().unwrap()
@@ -142,6 +137,16 @@ impl Runtime {
     /// Get an `OperationBuilder` for this runtime.
     fn operation(&self) -> OperationBuilder {
         unsafe { Operation::<'static, ()>::with_key(self.next_id.fetch_add(1, SeqCst)) }
+    }
+
+    /// Register a new source.
+    fn register(
+        &self,
+        #[cfg(unix)] source: &impl AsRawFd,
+        #[cfg(windows)] source: &impl AsRawHandle,
+    ) -> io::Result<()> {
+        log::trace!("Runtime: registering new source");
+        self.ring.register(source)
     }
 
     /// Submit an `Operation` to the runtime.
@@ -266,14 +271,16 @@ enum Repr<T> {
 #[cfg(unix)]
 impl<T: AsRawFd> Handle<T> {
     /// Create a new `Handle`.
-    pub fn new(io: T) -> Self {
-        if Runtime::available() {
-            Self(Repr::Submission {
+    pub fn new(io: T) -> io::Result<Self> {
+        if let Some(rt) = Runtime::get() {
+            rt.register(&io)?;
+
+            Ok(Self(Repr::Submission {
                 raw: RawContainer(io.as_raw()),
                 io: Some(io),
-            })
+            }))
         } else {
-            Self(Repr::Blocking(Unblock::new(io)))
+            Ok(Self(Repr::Blocking(Unblock::new(io))))
         }
     }
 }
@@ -281,14 +288,16 @@ impl<T: AsRawFd> Handle<T> {
 #[cfg(windows)]
 impl<T: AsRawHandle> Handle<T> {
     /// Create a new `Handle`.
-    pub fn new(io: T) -> Self {
-        if Runtime::available() {
-            Self(Repr::Submission {
+    pub fn new(io: T) -> io::Result<Self> {
+        if let Some(rt) = Runtime::get() {
+            rt.register(&io)?;
+
+            Ok(Self(Repr::Submission {
                 raw: RawContainer(io.as_raw()),
                 io: Some(io),
-            })
+            }))
         } else {
-            Self(Repr::Blocking(Unblock::new(io)))
+            Ok(Self(Repr::Blocking(Unblock::new(io))))
         }
     }
 }
@@ -350,6 +359,30 @@ impl<T: Send + 'static> Handle<T> {
 
                 (buffer, result.map(cvt_result))
             }
+        }
+    }
+}
+
+impl<T> Handle<T> {
+    /// Get a mutable reference to the raw handle.
+    ///
+    /// This is an asynchronous method because the underlying handle may be in use by another
+    /// thread, and this method will block until it is available.
+    pub async fn get_mut(&mut self) -> &mut T {
+        match &mut self.0 {
+            Repr::Blocking(io) => io.get_mut().await,
+            Repr::Submission { io, .. } => io.as_mut().unwrap(),
+        }
+    }
+
+    /// Extracts the inner handle.
+    ///
+    /// This is an asynchronous method because the underlying handle may be in use by another
+    /// thread, and this method will block until it is available.
+    pub async fn into_inner(mut self) -> T {
+        match self.0 {
+            Repr::Blocking(io) => io.into_inner().await,
+            Repr::Submission { ref mut io, .. } => io.take().unwrap(),
         }
     }
 }
@@ -423,6 +456,12 @@ impl<T: Write + MaybeSeek + Send + 'static> Handle<T> {
 /// This provides a higher-level interface to [`Handle`] that is compatible with
 /// the asynchronous I/O traits in the [`futures`] crate.
 ///
+/// ## Trait Implementations
+///
+/// Since `Adaptor` uses an internal buffer, it implements `BufRead` for `T: Read`. Use
+/// the [`Adaptor::with_capacity`] or [`Adaptor::set_capacity`] methods to control the
+/// size of the buffer.
+///
 /// [`futures`]: https://crates.io/crates/futures
 pub struct Adaptor<T>(State<T>);
 
@@ -457,27 +496,44 @@ type Task<T> =
 
 impl<T> From<Handle<T>> for Adaptor<T> {
     fn from(val: Handle<T>) -> Self {
-        Self(State::Idle(Idle {
-            io: val,
-            buffer: Vec::new(),
-            offset: 0,
-        }))
+        Self::with_handle_and_capacity(0, val)
     }
 }
 
 #[cfg(unix)]
 impl<T: AsRawFd> Adaptor<T> {
     /// Create a new `Adaptor`.
-    pub fn new(io: T) -> Self {
-        Handle::new(io).into()
+    pub fn new(io: T) -> io::Result<Self> {
+        Handle::new(io).map(Into::into)
+    }
+
+    /// Create a new `Adaptor` with the given capacity.
+    pub fn with_capacity(capacity: usize, io: T) -> io::Result<Self> {
+        Ok(Self::with_handle_and_capacity(capacity, Handle::new(io)?))
     }
 }
 
 #[cfg(windows)]
 impl<T: AsRawHandle> Adaptor<T> {
     /// Create a new `Adaptor`.
-    pub fn new(io: T) -> Self {
-        Handle::new(io).into()
+    pub fn new(io: T) -> io::Result<Self> {
+        Handle::new(io).map(Into::into)
+    }
+
+    /// Create a new `Adaptor` with the given capacity.
+    pub fn with_capacity(capacity: usize, io: T) -> io::Result<Self> {
+        Ok(Self::with_handle_and_capacity(capacity, Handle::new(io)?))
+    }
+}
+
+impl<T> Adaptor<T> {
+    /// Create a new `Adaptor` from a [`Handle`], with the given buffer capacity.
+    pub fn with_handle_and_capacity(capacity: usize, io: Handle<T>) -> Self {
+        Self(State::Idle(Idle {
+            io,
+            buffer: Vec::with_capacity(capacity),
+            offset: 0,
+        }))
     }
 }
 
