@@ -424,19 +424,17 @@ impl<T: Write + MaybeSeek + Send + 'static> Handle<T> {
 /// the asynchronous I/O traits in the [`futures`] crate.
 ///
 /// [`futures`]: https://crates.io/crates/futures
-pub struct Adaptor<T> {
-    state: State<T>,
-}
+pub struct Adaptor<T>(State<T>);
 
 enum State<T> {
     /// We are not doing anything.
-    Idle { idle: Idle<T> },
+    Idle(Idle<T>),
 
     /// We are reading.
-    Reading { task: Task<T> },
+    Reading(Task<T>),
 
     /// We are writing.
-    Writing { task: Task<T> },
+    Writing(Task<T>),
 
     /// Temporary placeholder value.
     Hole,
@@ -459,15 +457,11 @@ type Task<T> =
 
 impl<T> From<Handle<T>> for Adaptor<T> {
     fn from(val: Handle<T>) -> Self {
-        Self {
-            state: State::Idle {
-                idle: Idle {
-                    io: val,
-                    buffer: Vec::new(),
-                    offset: 0,
-                },
-            },
-        }
+        Self(State::Idle(Idle {
+            io: val,
+            buffer: Vec::new(),
+            offset: 0,
+        }))
     }
 }
 
@@ -496,17 +490,17 @@ impl<T: Send + Read + MaybeSeek + Unpin + 'static> AsyncRead for Adaptor<T> {
         let len = <[u8]>::len(buf);
 
         loop {
-            match &mut self.state {
+            match &mut self.0 {
                 State::Hole => unreachable!("Cannot poll an empty hole"),
-                State::Idle { idle } => match idle.io.0 {
+                State::Idle(idle) => match idle.io.0 {
                     Repr::Blocking(ref mut bl) => {
                         // We're using blocking I/O. Read directly.
                         return Pin::new(bl).poll_read(cx, buf);
                     }
                     _ => {
                         // Preform an asynchronous read.
-                        let idle = match mem::replace(&mut self.state, State::Hole) {
-                            State::Idle { idle } => idle,
+                        let idle = match mem::replace(&mut self.0, State::Hole) {
+                            State::Idle(idle) => idle,
                             _ => unreachable!(),
                         };
 
@@ -528,12 +522,10 @@ impl<T: Send + Read + MaybeSeek + Unpin + 'static> AsyncRead for Adaptor<T> {
                         };
 
                         // Begin polling it.
-                        self.state = State::Reading {
-                            task: Box::pin(task),
-                        };
+                        self.0 = State::Reading(Box::pin(task));
                     }
                 },
-                State::Reading { task } => {
+                State::Reading(task) => {
                     // Poll the task for completion.
                     let (io, buffer, offset, res) = ready!(task.poll(cx));
 
@@ -551,18 +543,16 @@ impl<T: Send + Read + MaybeSeek + Unpin + 'static> AsyncRead for Adaptor<T> {
                         Err(_) => 0,
                     };
 
-                    self.state = State::Idle {
-                        idle: Idle {
-                            io,
-                            buffer,
-                            offset: offset.saturating_add(increase as u64),
-                        },
-                    };
+                    self.0 = State::Idle(Idle {
+                        io,
+                        buffer,
+                        offset: offset.saturating_add(increase as u64),
+                    });
 
                     // Return the result.
                     return Poll::Ready(res);
                 }
-                State::Writing { .. } => panic!("Attempted to read while writing"),
+                State::Writing(_) => panic!("Attempted to read while writing"),
             }
         }
     }
@@ -575,17 +565,17 @@ impl<T: Send + Write + MaybeSeek + Unpin + 'static> AsyncWrite for Adaptor<T> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         loop {
-            match &mut self.state {
+            match &mut self.0 {
                 State::Hole => unreachable!("Cannot poll an empty hole"),
-                State::Idle { idle } => match idle.io.0 {
+                State::Idle(idle) => match idle.io.0 {
                     Repr::Blocking(ref mut bl) => {
                         // We're using blocking I/O. Write directly.
                         return Pin::new(bl).poll_write(cx, buf);
                     }
                     _ => {
                         // Preform an asynchronous write.
-                        let idle = match mem::replace(&mut self.state, State::Hole) {
-                            State::Idle { idle } => idle,
+                        let idle = match mem::replace(&mut self.0, State::Hole) {
+                            State::Idle(idle) => idle,
                             _ => unreachable!(),
                         };
 
@@ -607,37 +597,33 @@ impl<T: Send + Write + MaybeSeek + Unpin + 'static> AsyncWrite for Adaptor<T> {
                         };
 
                         // Begin polling it.
-                        self.state = State::Writing {
-                            task: Box::pin(task),
-                        };
+                        self.0 = State::Writing(Box::pin(task));
                     }
                 },
-                State::Writing { task } => {
+                State::Writing(task) => {
                     // Poll the task for completion.
                     let (io, buffer, offset, res) = ready!(task.poll(cx));
 
                     // Move ourself back into place.
                     let increase = *res.as_ref().unwrap_or(&0);
 
-                    self.state = State::Idle {
-                        idle: Idle {
-                            io,
-                            buffer,
-                            offset: offset.saturating_add(increase as u64),
-                        },
-                    };
+                    self.0 = State::Idle(Idle {
+                        io,
+                        buffer,
+                        offset: offset.saturating_add(increase as u64),
+                    });
 
                     // Return the result.
                     return Poll::Ready(res);
                 }
-                State::Reading { .. } => panic!("Attempted to write while reading"),
+                State::Reading(_) => panic!("Attempted to write while reading"),
             }
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.state {
-            State::Idle { idle } => {
+        match &mut self.0 {
+            State::Idle(idle) => {
                 match &mut idle.io.0 {
                     Repr::Blocking(ubl) => Pin::new(ubl).poll_flush(cx),
                     Repr::Submission { io, .. } => {
@@ -651,8 +637,8 @@ impl<T: Send + Write + MaybeSeek + Unpin + 'static> AsyncWrite for Adaptor<T> {
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.state {
-            State::Idle { idle } => {
+        match &mut self.0 {
+            State::Idle(idle) => {
                 match &mut idle.io.0 {
                     Repr::Blocking(ubl) => Pin::new(ubl).poll_close(cx),
                     Repr::Submission { .. } => {
@@ -672,8 +658,8 @@ impl<T: Send + Seek + Unpin + 'static> AsyncSeek for Adaptor<T> {
         cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        match &mut self.state {
-            State::Idle { idle } => {
+        match &mut self.0 {
+            State::Idle(idle) => {
                 match &mut idle.io.0 {
                     Repr::Blocking(ubl) => Pin::new(ubl).poll_seek(cx, pos),
                     Repr::Submission { .. } => {
@@ -714,6 +700,11 @@ impl<T: Seek + ?Sized> MaybeSeek for T {
 }
 
 /// An object whose seeking properties should be ignored.
+///
+/// Many functions in this crate are parameterized by an offset into the presumed file.
+/// However, certain types, like standard input/output, are streams where offsets make
+/// no sense. In this case, the type should be wrapped in `WontSeek` to indicate that
+/// seeking should be ignored.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct WontSeek<T>(pub T);
 
