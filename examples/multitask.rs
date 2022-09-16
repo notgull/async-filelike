@@ -26,12 +26,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             block_on(async {
                 // Get a list of every file in the current directory.
                 let read_dir = blocking::unblock(|| fs::read_dir(".")).await?;
-                let mut read_dir = blocking::Unblock::new(read_dir);
+                let read_dir = blocking::Unblock::new(read_dir);
 
                 // Open a new task for every file.
-                let mut tasks = vec![];
-                while let Some(entry) = read_dir.next().await {
-                    let entry = entry?;
+                let tasks = read_dir.filter_map(|entry| {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(err) => return Some(Err(err)),
+                    };
+
                     let path = entry.path();
                     if path.is_file() {
                         // Spawn a task that reads from the file.
@@ -48,14 +51,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok::<_, io::Error>(contents.len())
                         });
 
-                        // Push the task into our handle list.
-                        tasks.push(task);
+                        Some(io::Result::Ok(task))
+                    } else {
+                        None
                     }
-                }
+                }).collect::<Vec<_>>().await;
 
                 // Get the sum of characters.
                 let total_len = stream::iter(tasks)
-                    .then(std::convert::identity)
+                    .then(|task| Box::pin(async move {
+                        match task {
+                            Ok(task) => task.await,
+                            Err(err) => Err(err),
+                        }
+                    }))
                     .try_fold(0, |sum, result| Ok(sum + result))
                     .await?;
 
