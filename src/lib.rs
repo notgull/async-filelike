@@ -140,10 +140,7 @@ impl Runtime {
     }
 
     /// Register a new source.
-    fn register(
-        &self,
-        source: &impl AsRaw,
-    ) -> io::Result<Raw> {
+    fn register(&self, source: &impl AsRaw) -> io::Result<Raw> {
         log::trace!("Runtime: registering new source");
         self.ring.register(source)
     }

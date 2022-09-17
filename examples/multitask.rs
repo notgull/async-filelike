@@ -65,9 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .then(|task| async move {
                         match task {
                             Ok(task) => task.await,
-                            Err(err) =>  {
-                                Err(err)
-                            },
+                            Err(err) => Err(err),
                         }
                     })
                     .fold(io::Result::Ok(0), |sum, result| Ok(sum? + result?))
