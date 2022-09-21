@@ -60,9 +60,11 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::windows::io::{AsRawHandle, RawHandle};
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{self, prelude::*, SeekFrom};
 use std::mem;
 use std::ops;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::task::{Context, Poll};
@@ -301,6 +303,37 @@ impl<T: AsRawHandle> Handle<T> {
     }
 }
 
+impl<T> Handle<T> {
+    /// Create a new `Handle` that does not use asynchronous I/O and instead uses a thread pool.
+    ///
+    /// Usually, asynchronous file I/O is able to quickly read from a file but not write to it.
+    /// If you know you are going to be writing more often than you are reading, it may be a better
+    /// choice to use this method to create a `Handle` that uses a thread pool instead of a completion
+    /// queue.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use async_filelike::{Handle, OpenOptions};
+    /// use std::fs::File;
+    ///
+    /// # fn main() -> std::io::Result<()> { async_io::block_on(async {
+    /// // Create a new blocking handle.
+    /// let mut options = OpenOptions::default();
+    /// options.write = true;
+    /// options.create = true;
+    /// let file = options.open("foo.txt").await?;
+    /// let handle = Handle::new_blocking(file);
+    ///
+    /// // Write to the file.
+    /// handle.write_from(b"hello world", 12, 0).await?;
+    /// # Ok(()) }) }
+    /// ```
+    pub fn new_blocking(io: T) -> Self {
+        Self(Repr::Blocking(Unblock::new(io)))
+    }
+}
+
 impl<T: Send + 'static> Handle<T> {
     /// Run the operation on either the thread pool or the submission queue.
     async fn run_operation<R: Send + 'static, B: AsyncParameter + Send + 'static>(
@@ -448,6 +481,98 @@ impl<T: Write + MaybeSeek + Send + 'static> Handle<T> {
         )
         .await
     }
+}
+
+/// A builder for opening files with preconfigured options.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct OpenOptions {
+    /// Open the file in read mode.
+    pub read: bool,
+
+    /// Open the file in write mode.
+    pub write: bool,
+
+    /// Open the file in append mode.
+    pub append: bool,
+
+    /// Whether to truncate the previous file.
+    pub truncate: bool,
+
+    /// Whether to create the file if it doesn't exist.
+    pub create: bool,
+
+    /// Whether to create the file if it doesn't exist, and fail if it does.
+    pub create_new: bool,
+}
+
+impl OpenOptions {
+    /// Create a new set of options with default mode, etc.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> OpenOptions {
+        OpenOptions {
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
+    }
+
+    /// Open the file using the given options.
+    ///
+    /// This uses the appropriate instructions on `io_uring` if available, and uses the blocking
+    /// threadpool otherwise.
+    pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<fs::File> {
+        // TODO(notgull): Implement io_uring-specific implementation.
+
+        let options = self.to_std();
+        let path = path.as_ref().to_owned();
+
+        blocking::unblock(move || options.open(path)).await
+    }
+
+    /// Convert into the standard library version of this type.
+    fn to_std(&self) -> fs::OpenOptions {
+        let mut options = fs::OpenOptions::new();
+        if self.read {
+            options.read(true);
+        }
+        if self.write {
+            options.write(true);
+        }
+        if self.append {
+            options.append(true);
+        }
+        if self.truncate {
+            options.truncate(true);
+        }
+        if self.create {
+            options.create(true);
+        }
+        if self.create_new {
+            options.create_new(true);
+        }
+        options
+    }
+}
+
+/// Unlink the file at the given path.
+pub async fn unlink<P: AsRef<Path>>(path: P, directory: bool) -> io::Result<()> {
+    // TODO(notgull): Implement io_uring-specific implementation.
+
+    let path = path.as_ref().to_owned();
+    let directory = directory;
+
+    blocking::unblock(move || {
+        if directory {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
+        }
+    })
+    .await
 }
 
 /// An adaptor around a [`Handle`] that implements asynchronous I/O traits.

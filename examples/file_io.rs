@@ -1,13 +1,18 @@
 //! Cross-platform asynchronous file I/O example.
 
-use async_filelike::Handle;
+use async_filelike::{Handle, OpenOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     async_io::block_on(async {
-        // TODO: handle file opening in-crate
-        let file = blocking::unblock(|| std::fs::File::create("foo.txt")).await?;
+        // Create a new file.
+        let mut options = OpenOptions::new();
+        options.write = true;
+        options.create = true;
+        let file = options.open("foo.txt").await?;
+
+        // Wrap the file in a handle.
         let mut file = Handle::new(file)?;
 
         // Write some data to the file
@@ -17,7 +22,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Close and reopen the file.
         drop(file);
-        let file = blocking::unblock(|| std::fs::File::open("foo.txt")).await?;
+        let mut options = OpenOptions::new();
+        options.read = true;
+        let file = options.open("foo.txt").await?;
+
+        // Wrap it in a handle.
         let mut file = Handle::new(file)?;
 
         // Read the data back.
@@ -30,9 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Close the file and delete it.
         drop(file);
-        blocking::unblock(|| std::fs::remove_file("foo.txt"))
-            .await
-            .unwrap();
+        async_filelike::unlink("foo.txt", false).await?;
 
         Ok(())
     })

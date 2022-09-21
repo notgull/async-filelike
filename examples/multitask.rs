@@ -5,7 +5,7 @@
 
 use async_channel::bounded;
 use async_executor::Executor;
-use async_filelike::Adaptor;
+use async_filelike::{Adaptor, OpenOptions};
 use async_io::block_on;
 use easy_parallel::Parallel;
 use futures_lite::{prelude::*, stream};
@@ -41,7 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Spawn a task that reads from the file.
                             let task = executor.spawn(async move {
                                 // Open the file.
-                                let file = blocking::unblock(move || fs::File::open(&path)).await?;
+                                let mut options = OpenOptions::new();
+                                options.read = true;
+                                let file = options.open("foo.txt").await?;
+
+                                // Wrap in an adaptor.
                                 let mut file = Adaptor::new(file)?;
 
                                 // Read the contents.
