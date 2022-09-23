@@ -42,6 +42,25 @@
 //! [`io_uring`]: https://kernel.dk/io_uring.pdf
 //! [`submission`]: https://crates.io/crates/submission
 //! [`blocking`]: https://crates.io/crates/blocking
+//! 
+//! ## Examples
+//! 
+//! ```no_run
+//! use async_filelike::{Handle, OpenOptions};
+//! 
+//! # fn main() -> std::io::Result<()> { futures_lite::future::block_on(async {
+//! // Open a file asynchronously.
+//! let mut options = OpenOptions::default();
+//! options.read = true;
+//! let file = options.open("foo.txt").await?;
+//! let mut file = Handle::new(file)?;
+//! 
+//! // Read some bytes from the file.
+//! let mut buf = [0; 1024];
+//! let n = file.read(&mut buf).await?;
+//! println!("The bytes: {:?}", &buf[..n]);
+//! # Ok(()) }) }
+//! ```
 //!
 //! ## Performance
 //!
@@ -52,12 +71,15 @@
 //! as fast as the [`blocking`] thread pool. At worst, it is up to three times as slow.
 //!
 //! For read-heavy workloads, the [`Adaptor`] wrapper is a good choice. For write-heavy
-//! workloads, the [`blocking`] thread pool may be better.
+//! workloads, the [`blocking`] thread pool may be better. See the [`new_blocking`] method
+//! on [`Handle`] for more information.
+//! 
+//! [`new_blocking`]: struct.Handle.html#method.new_blocking
 
 #[cfg(unix)]
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::{io::{AsRawFd, RawFd}, fs::OpenOptionsExt};
 #[cfg(windows)]
-use std::os::windows::io::{AsRawHandle, RawHandle};
+use std::os::windows::{io::{AsRawHandle, RawHandle}, fs::OpenOptionsExt};
 
 use std::collections::HashMap;
 use std::fs;
@@ -78,7 +100,7 @@ use once_cell::sync::Lazy;
 use submission::{AsRaw, AsyncParameter, Completion, Operation, OperationBuilder, Raw, Ring};
 
 #[doc(inline)]
-pub use submission::{Buf, BufMut};
+pub use submission::{Buf, BufMut, UnixPathBuf, Slice};
 
 /// The runtime dictating how to handle the submission queue.
 struct Runtime {
@@ -240,7 +262,38 @@ impl Runtime {
 /// [`BufMut`] traits for more information.
 ///
 /// For a primitive with higher-level functionality, see the [`Adaptor`] type.
-///
+/// 
+/// ## Example
+/// 
+/// ```no_run
+/// use async_filelike::{Handle, OpenOptions};
+/// 
+/// # fn main() -> std::io::Result<()> { futures_lite::future::block_on(async {
+/// let mut options = OpenOptions::new();
+/// options.write = true;
+/// options.create = true;
+/// let mut file = Handle::new(options.open("foo.txt").await?)?;
+/// 
+/// // Write to the file.
+/// let mut buf = [0; 1024];
+/// file.write_from(buf, 0).await?;
+/// 
+/// // Drop the file.
+/// drop(file);
+/// 
+/// // Re-open the file.
+/// options.read = true;
+/// options.write = false;
+/// options.create = false;
+/// let mut file = Handle::new(options.open("foo.txt").await?)?;
+/// 
+/// // Read from the file.
+/// let mut buf = [0; 1024];
+/// file.read_into(buf, 0).await?;
+/// 
+/// # Ok(()) }) }
+/// ```
+/// 
 /// ## Supported Types
 ///
 /// On Unix-type operating systems, this crate should theoretically support any system
@@ -400,6 +453,23 @@ impl<T> Handle<T> {
     ///
     /// This is an asynchronous method because the underlying handle may be in use by another
     /// thread, and this method will block until it is available.
+    /// 
+    /// ## Examples
+    /// 
+    /// ```no_run
+    /// use async_filelike::{Handle, OpenOptions};
+    /// 
+    /// # fn main() -> std::io::Result<()> { async_io::block_on(async {
+    /// let mut options = OpenOptions::default();
+    /// options.read = true;
+    /// let file = options.open("foo.txt").await?;
+    /// let mut handle = Handle::new(file)?;
+    /// 
+    /// // Get a mutable reference to the inner handle.
+    /// let handle = handle.get_mut().await;
+    /// # let _ = handle;
+    /// # Ok(()) }) }
+    /// ```
     pub async fn get_mut(&mut self) -> &mut T {
         match &mut self.0 {
             Repr::Blocking(io) => io.get_mut().await,
@@ -411,6 +481,23 @@ impl<T> Handle<T> {
     ///
     /// This is an asynchronous method because the underlying handle may be in use by another
     /// thread, and this method will block until it is available.
+    /// 
+    /// ## Example
+    /// 
+    /// ```no_run
+    /// use async_filelike::{Handle, OpenOptions};
+    /// 
+    /// # fn main() -> std::io::Result<()> { async_io::block_on(async {
+    /// let mut options = OpenOptions::default();
+    /// options.read = true;
+    /// let file = options.open("foo.txt").await?;
+    /// let mut handle = Handle::new(file)?;
+    /// 
+    /// // Get the inner handle.
+    /// let handle = handle.into_inner().await;
+    /// # let _ = handle;
+    /// # Ok(()) }) }
+    /// ```
     pub async fn into_inner(mut self) -> T {
         match self.0 {
             Repr::Blocking(io) => io.into_inner().await,
@@ -421,10 +508,34 @@ impl<T> Handle<T> {
 
 impl<T: Read + MaybeSeek + Send + 'static> Handle<T> {
     /// Read into the given buffer at the given offset.
+    /// 
+    /// This function reads into the provided buffer, and then returns the number of bytes read alongside
+    /// the buffer that was read into. This method takes ownership of the buffer for the duration of the
+    /// operation, and returns it back once the operation is complete. If these semantics are not compatible
+    /// with your use case, consider using the [`Adaptor`] type instead.
+    /// 
+    /// If you would only like to read into a specific part of the buffer, see the [`Slice`] type.
+    /// 
+    /// ## Examples
+    /// 
+    /// ```no_run
+    /// use async_filelike::{Handle, OpenOptions};
+    /// 
+    /// # fn main() -> std::io::Result<()> { async_io::block_on(async {
+    /// let mut options = OpenOptions::default();
+    /// options.read = true;
+    /// let file = options.open("foo.txt").await?;
+    /// 
+    /// let mut handle = Handle::new(file)?;
+    /// 
+    /// // Read into a buffer.
+    /// let (buffer, bytes_read) = handle.read_at([0; 1024], 0).await?;
+    /// # let _ = (buffer, bytes_read);
+    /// # Ok(()) }) }
+    /// ```
     pub async fn read_into<B: AsMut<[u8]> + BufMut + Send + 'static>(
         &mut self,
         buf: B,
-        len: usize,
         offset: u64,
     ) -> (B, io::Result<usize>) {
         self.run_operation(
@@ -435,11 +546,7 @@ impl<T: Read + MaybeSeek + Send + 'static> Handle<T> {
                         return (buf, Err(e));
                     }
 
-                    let buf_slice = match buf.as_mut().get_mut(..len) {
-                        Some(buf_slice) => buf_slice,
-                        None => buf.as_mut(),
-                    };
-                    io.read(buf_slice)
+                    io.read(buf.as_mut())
                 };
 
                 (buf, result)
@@ -453,10 +560,35 @@ impl<T: Read + MaybeSeek + Send + 'static> Handle<T> {
 
 impl<T: Write + MaybeSeek + Send + 'static> Handle<T> {
     /// Write from the buffer at the given offset.
+    /// 
+    /// This function writes from the provided buffer, and then returns the number of bytes written alongside
+    /// the buffer that was written from. This method takes ownership of the buffer for the duration of the
+    /// operation, and returns it back once the operation is complete. If these semantics are not compatible with
+    /// your program, consider using the [`Adaptor`] type instead.
+    /// 
+    /// If you would only like to write from a specific part of the buffer, see the [`Slice`] type.
+    /// 
+    /// ## Examples
+    /// 
+    /// ```no_run
+    /// use async_filelike::{Handle, OpenOptions};
+    /// 
+    /// # fn main() -> std::io::Result<()> { async_io::block_on(async {
+    /// let mut options = OpenOptions::default();
+    /// options.write = true;
+    /// options.create = true;
+    /// let file = options.open("foo.txt").await?;
+    /// 
+    /// let mut handle = Handle::new(file)?;
+    /// 
+    /// // Write from a buffer.
+    /// let (buffer, bytes_written) = handle.write_at([0; 1024], 0).await?;
+    /// # let _ = (buffer, bytes_written);
+    /// # Ok(()) }) }
+    /// ```
     pub async fn write_from<B: AsRef<[u8]> + Buf + Send + 'static>(
         &mut self,
         buf: B,
-        len: usize,
         offset: u64,
     ) -> (B, io::Result<usize>) {
         self.run_operation(
@@ -467,11 +599,7 @@ impl<T: Write + MaybeSeek + Send + 'static> Handle<T> {
                         return (buf, Err(e));
                     }
 
-                    let buf_slice = match buf.as_ref().get(..len) {
-                        Some(buf_slice) => buf_slice,
-                        None => buf.as_ref(),
-                    };
-                    io.write(buf_slice)
+                    io.write(buf.as_ref())
                 };
 
                 (buf, result)
@@ -504,6 +632,30 @@ pub struct OpenOptions {
 
     /// Whether to create the file if it doesn't exist, and fail if it does.
     pub create_new: bool,
+
+    /// The mode to use when creating the file.
+    #[cfg(unix)]
+    pub mode: Option<u32>,
+
+    /// The access mode for the file.
+    #[cfg(windows)]
+    pub access_mode: Option<u32>,
+
+    /// The share mode for the file.
+    #[cfg(windows)]
+    pub share_mode: Option<u32>,
+
+    /// The flags for the file.
+    #[cfg(any(windows, unix))]
+    pub custom_flags: Option<u32>,
+
+    /// The attributes for the file.
+    #[cfg(windows)]
+    pub attributes: Option<u32>,
+
+    /// The security QOS for the file.
+    #[cfg(windows)]
+    pub security_qos_flags: Option<u32>,
 }
 
 impl OpenOptions {
@@ -517,6 +669,16 @@ impl OpenOptions {
             truncate: false,
             create: false,
             create_new: false,
+            #[cfg(unix)]
+            mode: None,
+            #[cfg(windows)]
+            access_mode: None,
+            #[cfg(windows)]
+            share_mode: None,
+            #[cfg(any(windows, unix))]
+            custom_flags: None,
+            #[cfg(windows)]
+            attributes: None,
         }
     }
 
@@ -553,6 +715,26 @@ impl OpenOptions {
         }
         if self.create_new {
             options.create_new(true);
+        }
+        #[cfg(unix)]
+        if let Some(mode) = self.mode {
+            options.mode(mode);
+        }
+        #[cfg(windows)]
+        if let Some(access_mode) = self.access_mode {
+            options.access_mode(access_mode);
+        }
+        #[cfg(windows)]
+        if let Some(share_mode) = self.share_mode {
+            options.share_mode(share_mode);
+        }
+        #[cfg(any(windows, unix))]
+        if let Some(custom_flags) = self.custom_flags {
+            options.custom_flags(custom_flags);
+        }
+        #[cfg(windows)]
+        if let Some(attributes) = self.attributes {
+            options.attributes(attributes);
         }
         options
     }
@@ -697,7 +879,7 @@ impl<T: Send + Read + MaybeSeek + Unpin + 'static> AsyncRead for Adaptor<T> {
                         }
 
                         let task = async move {
-                            let (buffer, res) = io.read_into(buffer, len, offset).await;
+                            let (buffer, res) = io.read_into(buffer, offset).await;
                             (io, buffer, offset, res)
                         };
 
@@ -772,7 +954,7 @@ impl<T: Send + Write + MaybeSeek + Unpin + 'static> AsyncWrite for Adaptor<T> {
                         let len = buf.len();
 
                         let task = async move {
-                            let (buffer, res) = io.write_from(buffer, len, offset).await;
+                            let (buffer, res) = io.write_from(buffer, offset).await;
                             (io, buffer, offset, res)
                         };
 
